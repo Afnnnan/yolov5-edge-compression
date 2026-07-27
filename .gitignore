@@ -1,0 +1,40 @@
+# Model artifacts
+outputs/
+*.engine
+*.onnx
+*.cache
+*.trt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data
+data/
+coco/
+val2017/
+annotations/
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Screenshots (original)
+screenshot_*.png
+Screenshot*.png

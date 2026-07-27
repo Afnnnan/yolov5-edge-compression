@@ -1,0 +1,44 @@
+# =============================================================================
+# Model Compression Pipeline Configuration
+# =============================================================================
+
+model:
+  # YOLOv5n-u (ultralytics-native variant) — clean ONNX export
+  name: "yolov5nu"
+  weights: "yolov5nu.pt"
+  input_size: 640
+  batch_size: 1
+  num_classes: 80  # COCO classes
+
+calibration:
+  # Number of images from COCO val2017 for INT8 calibration
+  num_images: 500
+  cache_file: "outputs/calibration.cache"
+  algorithm: "entropy"  # entropy | minmax
+
+benchmark:
+  warmup_iterations: 50
+  measure_iterations: 300
+
+evaluation:
+  dataset: "coco_val2017"
+  # Set to smaller number for faster runs (e.g., 1000)
+  num_images: 5000
+  confidence_threshold: 0.001
+  nms_iou_threshold: 0.65
+
+paths:
+  output_dir: "outputs"
+  onnx_model: "outputs/yolov5n.onnx"
+  fp32_engine: "outputs/yolov5n_fp32.engine"
+  fp16_engine: "outputs/yolov5n_fp16.engine"
+  int8_engine: "outputs/yolov5n_int8.engine"
+  results_dir: "outputs/results"
+  demo_dir: "outputs/demo"
+  coco_dir: "data/coco"
+  coco_images: "data/coco/val2017"
+  coco_annotations: "data/coco/annotations/instances_val2017.json"
+
+# COCO category ID mapping (for pycocotools evaluation)
+# YOLOv5 uses 0-indexed class IDs; COCO uses specific category IDs
+# This mapping is handled automatically in coco_utils.py

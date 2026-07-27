@@ -1,0 +1,26 @@
+# Core ML
+ultralytics>=8.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ONNX
+onnx>=1.14.0
+onnxruntime-gpu>=1.16.0
+
+# TensorRT (install from NVIDIA PyPI on Kaggle)
+# pip install --extra-index-url https://pypi.nvidia.com tensorrt-cu12
+# pycuda>=2024.1
+
+# Evaluation
+pycocotools>=2.0.6
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Utilities
+numpy>=1.24.0
+opencv-python>=4.8.0
+pyyaml>=6.0
+tqdm>=4.65.0
+tabulate>=0.9.0
