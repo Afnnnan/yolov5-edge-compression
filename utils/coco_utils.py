@@ -289,9 +289,12 @@ def postprocess_yolov5(
     """
     Postprocess raw YOLOv5 output tensor.
 
+    Supports two output formats:
+      - YOLOv5 classic (85 channels): [x, y, w, h, obj_conf, cls0..cls79]
+      - YOLOv5nu / YOLOv8-style (84 channels): [x, y, w, h, cls0..cls79]
+
     Args:
-        raw_output: Raw model output, shape (batch, num_anchors, 85)
-                    where 85 = [x, y, w, h, obj_conf, cls0, cls1, ..., cls79]
+        raw_output: Raw model output, shape (batch, num_anchors, 84 or 85)
         conf_threshold: Minimum confidence threshold
         iou_threshold: NMS IoU threshold
         max_detections: Maximum detections per image
@@ -301,26 +304,29 @@ def postprocess_yolov5(
         [x1, y1, x2, y2, confidence, class_id]
     """
     batch_size = raw_output.shape[0]
+    num_channels = raw_output.shape[2]
     results = []
 
+    # Auto-detect output format
+    # 84 channels = YOLOv5nu (no objectness): [x,y,w,h, 80 classes]
+    # 85 channels = classic YOLOv5 (with objectness): [x,y,w,h, obj, 80 classes]
+    has_objectness = (num_channels == 85)
+
     for i in range(batch_size):
-        predictions = raw_output[i]  # (num_anchors, 85)
+        predictions = raw_output[i]  # (num_anchors, 84 or 85)
 
-        # Filter by objectness confidence
-        obj_conf = predictions[:, 4]
-        mask = obj_conf > conf_threshold
-        predictions = predictions[mask]
+        if has_objectness:
+            # Classic YOLOv5: confidence = obj_conf * class_prob
+            obj_conf = predictions[:, 4]
+            class_scores = predictions[:, 5:] * obj_conf[:, None]
+        else:
+            # YOLOv5nu / YOLOv8: confidence = class_prob directly
+            class_scores = predictions[:, 4:]
 
-        if len(predictions) == 0:
-            results.append(np.zeros((0, 6)))
-            continue
-
-        # Compute class scores = objectness * class_probability
-        class_scores = predictions[:, 5:] * predictions[:, 4:5]
         class_ids = class_scores.argmax(axis=1)
         class_confs = class_scores.max(axis=1)
 
-        # Filter by class confidence
+        # Filter by confidence
         mask = class_confs > conf_threshold
         predictions = predictions[mask]
         class_ids = class_ids[mask]
@@ -339,14 +345,14 @@ def postprocess_yolov5(
         for cls in unique_classes:
             cls_mask = class_ids == cls
             cls_boxes = boxes[cls_mask]
-            cls_scores = class_confs[cls_mask]
+            cls_scores_nms = class_confs[cls_mask]
 
-            keep = numpy_nms(cls_boxes, cls_scores, iou_threshold)
+            keep = numpy_nms(cls_boxes, cls_scores_nms, iou_threshold)
             for k in keep:
                 detections.append([
                     cls_boxes[k, 0], cls_boxes[k, 1],
                     cls_boxes[k, 2], cls_boxes[k, 3],
-                    cls_scores[k], cls,
+                    cls_scores_nms[k], cls,
                 ])
 
         if len(detections) == 0:

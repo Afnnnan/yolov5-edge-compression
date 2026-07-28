@@ -33,7 +33,7 @@ from ultralytics import YOLO
 logger = setup_logger("evaluate_accuracy")
 
 
-def evaluate_pytorch(model_path, images_dir, image_ids, num_images):
+def evaluate_pytorch(model_path, images_dir, image_ids, num_images, conf_thres, iou_thres):
     """Evaluate PyTorch model using ultralytics YOLO."""
     logger.info(f"Loading PyTorch model: {model_path}")
     model = YOLO(model_path)
@@ -41,8 +41,8 @@ def evaluate_pytorch(model_path, images_dir, image_ids, num_images):
     
     for img_id in tqdm(image_ids[:num_images], desc="PyTorch FP32"):
         img_path = get_coco_image_path(images_dir, img_id)
-        # ultralytics model handles preprocessing, inference, and postprocessing
-        results = model(img_path, verbose=False)
+        # Use low conf threshold so pycocotools can compute full precision-recall curve
+        results = model(img_path, verbose=False, conf=conf_thres, iou=iou_thres, max_det=300)
         # boxes.data is [x1, y1, x2, y2, conf, cls]
         det = results[0].boxes.data.cpu().numpy()
         
@@ -130,7 +130,7 @@ def main():
     
     if "pytorch" in args.models:
         model_path = config["model"]["weights"]
-        preds = evaluate_pytorch(model_path, images_dir, image_ids, num_images)
+        preds = evaluate_pytorch(model_path, images_dir, image_ids, num_images, conf_thres, iou_thres)
         metrics = compute_map(coco_gt, preds)
         results_summary["PyTorch FP32"] = metrics
         
