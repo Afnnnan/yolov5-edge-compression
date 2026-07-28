@@ -1,6 +1,9 @@
 """
 Script to run visual demo inference.
 Compares PyTorch FP32 and TensorRT predictions side-by-side.
+
+NOTE: PyTorch and TRT inferences are done in separate passes
+to avoid CUDA context conflicts between torch and PyCUDA.
 """
 
 import os
@@ -45,65 +48,6 @@ def draw_detections(image, detections, colors):
     return img
 
 
-def run_pytorch(model, img_path):
-    """Run inference with PyTorch YOLOv5n."""
-    t0 = time.perf_counter()
-    results = model(img_path, verbose=False)
-    t1 = time.perf_counter()
-
-    det = results[0].boxes.data.cpu().numpy()
-    return det, (t1 - t0) * 1000
-
-
-def run_trt(engine, img_path, conf_thres, iou_thres):
-    """Run inference with TensorRT engine."""
-    input_size = engine.get_input_shape()[-1]
-
-    t0 = time.perf_counter()
-    input_tensor, _, meta = preprocess_image(img_path, input_size)
-    outputs = engine.infer(input_tensor)
-    out = outputs[0]
-
-    # Transpose (1, 84, 8400) -> (1, 8400, 84) if needed
-    if out.shape[1] < out.shape[2]:
-        out = np.transpose(out, (0, 2, 1))
-
-    dets = postprocess_yolov5(out, conf_thres, iou_thres)[0]
-    dets = scale_boxes_to_original(dets, meta)
-    t1 = time.perf_counter()
-
-    return dets, (t1 - t0) * 1000
-
-
-def run_trt_debug(engine, img_path):
-    """Run TRT inference and print raw output statistics for debugging."""
-    input_size = engine.get_input_shape()[-1]
-    input_tensor, _, meta = preprocess_image(img_path, input_size)
-    outputs = engine.infer(input_tensor)
-    out = outputs[0]
-
-    print(f"\n  [DEBUG] Raw TRT output shape: {out.shape}")
-    print(f"  [DEBUG] Raw output[0] min={out.min():.4f}, max={out.max():.4f}, mean={out.mean():.4f}")
-
-    if out.shape[1] < out.shape[2]:
-        out = np.transpose(out, (0, 2, 1))
-
-    predictions = out[0]  # (8400, 84)
-    box_coords = predictions[:, :4]
-    class_scores = predictions[:, 4:]
-
-    print(f"  [DEBUG] Box coords: min={box_coords.min():.2f}, max={box_coords.max():.2f}")
-    print(f"  [DEBUG] Class scores: min={class_scores.min():.6f}, max={class_scores.max():.6f}, mean={class_scores.mean():.6f}")
-
-    # Check how many detections pass various thresholds
-    max_scores = class_scores.max(axis=1)
-    for thresh in [0.001, 0.01, 0.1, 0.25, 0.5]:
-        count = (max_scores > thresh).sum()
-        print(f"  [DEBUG] Detections with conf > {thresh}: {count}")
-
-    return class_scores
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run visual demo inference")
     parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config file")
@@ -119,7 +63,7 @@ def main():
     images_dir = config["paths"]["coco_images"]
 
     if not os.path.exists(ann_file) or not os.path.exists(images_dir):
-        logger.error("COCO dataset not found. Please run evaluate_accuracy.py first to download.")
+        logger.error("COCO dataset not found. Run evaluate_accuracy.py first.")
         sys.exit(1)
 
     image_ids = get_coco_image_ids(ann_file)
@@ -127,13 +71,37 @@ def main():
     sample_ids = random.sample(image_ids, 8)
 
     colors = get_color_palette(len(COCO_CLASS_NAMES))
+    conf_thres = args.conf_thres
+    iou_thres = args.iou_thres
 
-    # Load PyTorch model
+    # ================================================================
+    # PASS 1: Run ALL PyTorch inferences first (uses torch CUDA context)
+    # ================================================================
+    logger.info("Pass 1: Running PyTorch inference on all samples...")
     pt_model = YOLO(config["model"]["weights"])
+    pt_results = {}  # img_id -> (detections, time_ms)
 
-    # Load TRT engine (try INT8 -> FP16 -> FP32)
+    for img_id in sample_ids:
+        img_path = get_coco_image_path(images_dir, img_id)
+        t0 = time.perf_counter()
+        results = pt_model(img_path, verbose=False)
+        t1 = time.perf_counter()
+        det = results[0].boxes.data.cpu().numpy()
+        pt_results[img_id] = (det, (t1 - t0) * 1000)
+        logger.info(f"  PyTorch img {img_id}: {len(det)} detections, {(t1-t0)*1000:.1f}ms")
+
+    # Free PyTorch GPU memory before loading TRT
+    del pt_model
+    import torch
+    torch.cuda.empty_cache()
+
+    # ================================================================
+    # PASS 2: Run ALL TRT inferences (uses PyCUDA context)
+    # ================================================================
     engine = None
-    engine_name = "TRT INT8"
+    engine_name = "TRT"
+    trt_results = {}  # img_id -> (detections, time_ms)
+
     for prec, key in [("INT8", "int8_engine"), ("FP16", "fp16_engine"), ("FP32", "fp32_engine")]:
         trt_path = config["paths"].get(key, f"outputs/yolov5n_{prec.lower()}.engine")
         if os.path.exists(trt_path):
@@ -146,64 +114,81 @@ def main():
             except Exception as e:
                 logger.warning(f"Failed to load {prec} engine: {e}")
 
-    conf_thres = args.conf_thres
-    iou_thres = args.iou_thres
-
-    # Debug: print raw output statistics for first image
     if engine:
-        first_img = get_coco_image_path(images_dir, sample_ids[0])
-        print("\n" + "=" * 60)
-        print("DEBUG: TRT Raw Output Analysis")
-        print("=" * 60)
-        run_trt_debug(engine, first_img)
-        print("=" * 60 + "\n")
+        input_size = engine.get_input_shape()[-1]
+        logger.info(f"Pass 2: Running {engine_name} inference on all samples...")
 
-    int8_images = []
+        for img_id in sample_ids:
+            img_path = get_coco_image_path(images_dir, img_id)
+
+            t0 = time.perf_counter()
+            input_tensor, _, meta = preprocess_image(img_path, input_size)
+            outputs = engine.infer(input_tensor)
+            out = outputs[0]
+
+            # Transpose (1, 84, 8400) -> (1, 8400, 84) if needed
+            if out.shape[1] < out.shape[2]:
+                out = np.transpose(out, (0, 2, 1))
+
+            dets = postprocess_yolov5(out, conf_thres, iou_thres)[0]
+            dets = scale_boxes_to_original(dets, meta)
+            t1 = time.perf_counter()
+
+            trt_results[img_id] = (dets, (t1 - t0) * 1000)
+            logger.info(f"  {engine_name} img {img_id}: {len(dets)} detections, {(t1-t0)*1000:.1f}ms")
+
+        engine.cleanup()
+    else:
+        logger.warning("No TRT engine available for demo")
+
+    # ================================================================
+    # PASS 3: Create side-by-side images
+    # ================================================================
+    logger.info("Pass 3: Creating side-by-side comparison images...")
+    trt_grid_images = []
 
     for i, img_id in enumerate(sample_ids):
         img_path = get_coco_image_path(images_dir, img_id)
         orig_img = cv2.imread(img_path)
 
-        # PyTorch
-        pt_dets, pt_time = run_pytorch(pt_model, img_path)
+        # PyTorch side
+        pt_dets, pt_time = pt_results[img_id]
         pt_img = draw_detections(orig_img, pt_dets, colors)
         cv2.putText(pt_img, f"PyTorch FP32: {len(pt_dets)} objs, {pt_time:.1f}ms",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-        # TensorRT
-        if engine:
-            trt_dets, trt_time = run_trt(engine, img_path, conf_thres, iou_thres)
+        # TRT side
+        if img_id in trt_results:
+            trt_dets, trt_time = trt_results[img_id]
             trt_img = draw_detections(orig_img, trt_dets, colors)
             cv2.putText(trt_img, f"{engine_name}: {len(trt_dets)} objs, {trt_time:.1f}ms",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         else:
             trt_img = orig_img.copy()
-            cv2.putText(trt_img, "TRT Engine Not Available", (10, 30),
+            cv2.putText(trt_img, "TRT Not Available", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Side-by-side
+        # Save side-by-side
         combined = np.hstack((pt_img, trt_img))
         out_path = os.path.join(demo_dir, f"demo_sample_{i}.jpg")
         cv2.imwrite(out_path, combined)
 
-        int8_images.append(cv2.resize(trt_img, (640, 640)))
+        trt_grid_images.append(cv2.resize(trt_img, (640, 640)))
 
-        if engine:
-            logger.info(f"Image {img_id}: PT={len(pt_dets)} objs ({pt_time:.1f}ms) | {engine_name}={len(trt_dets)} objs ({trt_time:.1f}ms)")
-        else:
-            logger.info(f"Image {img_id}: PT={len(pt_dets)} objs ({pt_time:.1f}ms) | TRT not available")
-
-    if engine:
-        engine.cleanup()
+        pt_n = len(pt_dets)
+        trt_n = len(trt_dets) if img_id in trt_results else 0
+        logger.info(f"  Sample {i}: PT={pt_n} objs | {engine_name}={trt_n} objs")
 
     # Create 2x4 grid
-    if len(int8_images) == 8:
-        row1 = np.hstack(int8_images[:4])
-        row2 = np.hstack(int8_images[4:])
+    if len(trt_grid_images) == 8:
+        row1 = np.hstack(trt_grid_images[:4])
+        row2 = np.hstack(trt_grid_images[4:])
         grid = np.vstack((row1, row2))
-        grid_path = os.path.join(demo_dir, "demo_grid_int8.jpg")
+        grid_path = os.path.join(demo_dir, "demo_grid_trt.jpg")
         cv2.imwrite(grid_path, grid)
         logger.info(f"Saved 2x4 grid to {grid_path}")
+
+    logger.info("Demo inference complete!")
 
 
 if __name__ == "__main__":
