@@ -346,6 +346,36 @@ print("-" * 90)
 print(f"{'Model':<20} {'Latency (ms)':<15} {'FPS':<10} {'mAP@0.5':<12} {'mAP@0.5:0.95':<15} {'Size (MB)':<10}")
 print("-" * 90)
 
+# Helper for robust model lookup across different JSON key formats
+def _find_model_data(data_dict, model_name):
+    if not data_dict or not isinstance(data_dict, dict):
+        return {}
+    if model_name in data_dict:
+        return data_dict[model_name]
+    
+    target = model_name.lower().replace("_", " ").replace("tensorrt", "trt")
+    for k, v in data_dict.items():
+        k_clean = k.lower().replace("_", " ").replace("tensorrt", "trt")
+        if k_clean == target or set(k_clean.split()) == set(target.split()):
+            return v
+        if "pytorch" in target and "pytorch" in k_clean:
+            return v
+    return {}
+
+# Load benchmark & accuracy JSON files directly from disk
+bench_results_file = "outputs/results/benchmark_latency.json"
+acc_results_file = "outputs/results/accuracy_results.json"
+
+bench_data = {}
+if os.path.exists(bench_results_file):
+    with open(bench_results_file) as f:
+        bench_data = json.load(f)
+
+acc_data = {}
+if os.path.exists(acc_results_file):
+    with open(acc_results_file) as f:
+        acc_data = json.load(f)
+
 model_variants = ["PyTorch FP32", "TRT FP32", "TRT FP16", "TRT INT8"]
 engine_paths = {
     "PyTorch FP32": None,
@@ -357,21 +387,19 @@ engine_paths = {
 for model_name in model_variants:
     latency = fps = map50 = map50_95 = size_mb = "N/A"
 
-    if os.path.exists(results_path):
-        bench = bench_results.get(model_name, bench_results.get(model_name.replace("_", " "), {}))
-        if isinstance(bench, dict):
-            lat_val = bench.get('mean_ms', bench.get('mean_latency_ms', 0))
-            fps_val = bench.get('fps', bench.get('throughput_fps', 0))
-            if lat_val > 0:
-                latency = f"{lat_val:.2f}"
-            if fps_val > 0:
-                fps = f"{fps_val:.1f}"
+    bench = _find_model_data(bench_data, model_name)
+    if bench:
+        lat_val = bench.get('mean_ms', bench.get('mean_latency_ms', 0))
+        fps_val = bench.get('fps', bench.get('throughput_fps', 0))
+        if lat_val > 0:
+            latency = f"{lat_val:.2f}"
+        if fps_val > 0:
+            fps = f"{fps_val:.1f}"
 
-    if os.path.exists(acc_path):
-        acc = acc_results.get(model_name, acc_results.get(model_name.replace("_", " "), {}))
-        if isinstance(acc, dict):
-            map50 = f"{acc.get('mAP50', 0):.4f}"
-            map50_95 = f"{acc.get('mAP50-95', 0):.4f}"
+    acc = _find_model_data(acc_data, model_name)
+    if acc:
+        map50 = f"{acc.get('mAP50', 0):.4f}"
+        map50_95 = f"{acc.get('mAP50-95', 0):.4f}"
 
     path = engine_paths.get(model_name)
     if path and os.path.exists(path):
@@ -382,14 +410,13 @@ for model_name in model_variants:
 print("-" * 90)
 
 # Speedup summary
-if os.path.exists(results_path):
-    pt_bench = bench_results.get("PyTorch FP32", bench_results.get("PyTorch", {}))
-    int8_bench = bench_results.get("TRT INT8", bench_results.get("TensorRT INT8", {}))
-    pytorch_lat = pt_bench.get("mean_ms", pt_bench.get("mean_latency_ms", 0))
-    int8_lat = int8_bench.get("mean_ms", int8_bench.get("mean_latency_ms", 0))
-    if pytorch_lat > 0 and int8_lat > 0:
-        speedup = pytorch_lat / int8_lat
-        print(f"\n🚀 INT8 Speedup over PyTorch FP32: {speedup:.2f}x")
+pt_bench = _find_model_data(bench_data, "PyTorch FP32")
+int8_bench = _find_model_data(bench_data, "TRT INT8")
+pytorch_lat = pt_bench.get("mean_ms", pt_bench.get("mean_latency_ms", 0))
+int8_lat = int8_bench.get("mean_ms", int8_bench.get("mean_latency_ms", 0))
+if pytorch_lat > 0 and int8_lat > 0:
+    speedup = pytorch_lat / int8_lat
+    print(f"\n🚀 INT8 Speedup over PyTorch FP32: {speedup:.2f}x")
 
 print("\n✅ Pipeline completed successfully!")
 print("📁 All outputs saved in: outputs/")
