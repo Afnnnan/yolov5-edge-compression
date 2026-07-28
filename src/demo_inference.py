@@ -116,6 +116,14 @@ def main():
 
     if engine:
         input_size = engine.get_input_shape()[-1]
+
+        # Warmup: run a few dummy inferences to stabilize the CUDA context
+        # The first call after PyTorch cleanup can fail silently
+        logger.info(f"Warming up {engine_name} engine...")
+        dummy_input = np.random.randn(1, 3, input_size, input_size).astype(np.float32)
+        for _ in range(5):
+            engine.infer(dummy_input)
+
         logger.info(f"Pass 2: Running {engine_name} inference on all samples...")
 
         for img_id in sample_ids:
