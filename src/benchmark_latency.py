@@ -88,8 +88,12 @@ def benchmark_trt(logger, engine_path, config):
     if not os.path.exists(engine_path):
         logger.warning(f"Engine not found: {engine_path}. Skipping.")
         return None
-        
-    engine = TRTInference(engine_path)
+
+    try:
+        engine = TRTInference(engine_path)
+    except Exception as e:
+        logger.warning(f"Failed to load engine {engine_path}: {e}. Skipping.")
+        return None
     timer = CUDATimer()
     
     # Generate random input data

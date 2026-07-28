@@ -51,8 +51,8 @@ def parse_args():
 # Strategy 1: TensorRT Python API (for FP32 and FP16)
 # =============================================================================
 
-def build_engine_trt_api(onnx_path, output_path, precision="fp32"):
-    """Build engine using TensorRT Python API. Works for FP32 and FP16."""
+def build_engine_trt_api(onnx_path, output_path, precision="fp32", pipeline_config=None):
+    """Build engine using TensorRT Python API. Works for FP32, FP16, and INT8."""
     if not HAS_TRT:
         raise RuntimeError("TensorRT not available")
 
@@ -69,13 +69,13 @@ def build_engine_trt_api(onnx_path, output_path, precision="fp32"):
 
     network = builder.create_network(network_flags)
     parser = trt.OnnxParser(network, TRT_LOGGER)
-    config = builder.create_builder_config()
+    builder_config = builder.create_builder_config()
 
     # 2GB workspace
-    if hasattr(config, 'set_memory_pool_limit'):
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    if hasattr(builder_config, 'set_memory_pool_limit'):
+        builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
     else:
-        config.max_workspace_size = 2 << 30  # Legacy API
+        builder_config.max_workspace_size = 2 << 30  # Legacy API
 
     # Parse ONNX
     with open(onnx_path, "rb") as model:
@@ -89,11 +89,29 @@ def build_engine_trt_api(onnx_path, output_path, precision="fp32"):
     # Set precision flags
     if precision == "fp16":
         if hasattr(trt, 'BuilderFlag') and hasattr(trt.BuilderFlag, 'FP16'):
-            config.set_flag(trt.BuilderFlag.FP16)
+            builder_config.set_flag(trt.BuilderFlag.FP16)
         logger.info("FP16 mode enabled")
+    elif precision == "int8":
+        # Enable INT8 + FP16 fallback
+        if hasattr(trt, 'BuilderFlag') and hasattr(trt.BuilderFlag, 'INT8'):
+            builder_config.set_flag(trt.BuilderFlag.INT8)
+        if hasattr(trt, 'BuilderFlag') and hasattr(trt.BuilderFlag, 'FP16'):
+            builder_config.set_flag(trt.BuilderFlag.FP16)
+
+        # Try to attach calibrator for proper INT8 quantization
+        calibrator = _try_create_calibrator(pipeline_config)
+        if calibrator is not None:
+            builder_config.int8_calibrator = calibrator
+            logger.info("INT8 mode enabled with calibration")
+        else:
+            logger.warning(
+                "INT8 mode enabled WITHOUT calibrator. "
+                "Layers without quantization info will fall back to FP16. "
+                "Accuracy may be reduced compared to properly calibrated INT8."
+            )
 
     # Build engine
-    serialized_engine = builder.build_serialized_network(network, config)
+    serialized_engine = builder.build_serialized_network(network, builder_config)
     if serialized_engine is None:
         raise RuntimeError(f"Failed to build {precision.upper()} engine")
 
@@ -107,9 +125,55 @@ def build_engine_trt_api(onnx_path, output_path, precision="fp32"):
     return True
 
 
+def _try_create_calibrator(config):
+    """
+    Try to create an INT8 calibrator using the TRT Python API.
+    Returns None if calibrator classes are not available.
+    """
+    if not config:
+        return None
+
+    try:
+        from utils.calibrator import YOLOv5EntropyCalibrator, HAS_CALIBRATOR_API
+        if not HAS_CALIBRATOR_API:
+            logger.info("Calibrator API not available in this TensorRT version")
+            return None
+
+        from utils.coco_utils import CalibrationDataLoader
+
+        input_size = config["model"]["input_size"]
+        batch_size = config["model"]["batch_size"]
+        calib_images = config["calibration"]["num_images"]
+        cache_file = config["calibration"]["cache_file"]
+        coco_images = config["paths"]["coco_images"]
+
+        if not os.path.exists(coco_images):
+            logger.warning(f"Calibration images not found at {coco_images}")
+            return None
+
+        logger.info(f"Creating INT8 calibrator with {calib_images} images from {coco_images}")
+        data_loader = CalibrationDataLoader(
+            images_dir=coco_images,
+            num_images=calib_images,
+            input_size=input_size,
+            batch_size=batch_size,
+        )
+
+        calibrator = YOLOv5EntropyCalibrator(
+            data_loader=data_loader,
+            cache_file=cache_file,
+            input_shape=(batch_size, 3, input_size, input_size),
+        )
+        logger.info("Calibrator created successfully")
+        return calibrator
+
+    except Exception as e:
+        logger.warning(f"Failed to create calibrator: {e}")
+        return None
+
+
 # =============================================================================
-# Strategy 2: Ultralytics Export (for INT8 — handles calibration internally)
-# =============================================================================
+# Strategy 2: Ultralytics Export (fallback, especially for INT8)
 
 def build_engine_ultralytics(weights, output_path, precision="int8", config=None):
     """
@@ -324,19 +388,20 @@ def build_engine(config, precision="fp32"):
     logger.info(f"{'='*60}")
 
     if precision == "int8":
-        # INT8 always uses ultralytics (handles calibration automatically)
-        with Timer(f"Build {precision.upper()} Engine", logger):
-            success = build_engine_ultralytics(weights, output_path, precision, config)
-        if not success:
-            logger.error(f"Failed to build {precision.upper()} engine with all strategies")
-        return success
-
-    # FP32 / FP16: try TRT Python API first, then trtexec, then ultralytics
-    strategies = [
-        ("TRT Python API", lambda: build_engine_trt_api(onnx_path, output_path, precision)),
-        ("trtexec CLI", lambda: build_engine_trtexec(onnx_path, output_path, precision)),
-        ("Ultralytics export", lambda: build_engine_ultralytics(weights, output_path, precision, config)),
-    ]
+        # INT8: try TRT Python API first (ensures same serialization version),
+        # then trtexec, then ultralytics as last resort
+        strategies = [
+            ("TRT Python API", lambda: build_engine_trt_api(onnx_path, output_path, precision, config)),
+            ("trtexec CLI", lambda: build_engine_trtexec(onnx_path, output_path, precision)),
+            ("Ultralytics export", lambda: build_engine_ultralytics(weights, output_path, precision, config)),
+        ]
+    else:
+        # FP32 / FP16: try TRT Python API first, then trtexec, then ultralytics
+        strategies = [
+            ("TRT Python API", lambda: build_engine_trt_api(onnx_path, output_path, precision)),
+            ("trtexec CLI", lambda: build_engine_trtexec(onnx_path, output_path, precision)),
+            ("Ultralytics export", lambda: build_engine_ultralytics(weights, output_path, precision, config)),
+        ]
 
     for name, strategy_fn in strategies:
         try:
