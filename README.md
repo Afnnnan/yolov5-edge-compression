@@ -36,48 +36,6 @@ topcoder/
 └── README.md
 ```
 
-## Quick Start (Kaggle)
-
-### Prerequisites
-- Kaggle account with GPU (T4) access
-- Internet-enabled notebook
-
-### Steps
-
-1. **Push this repo to GitHub**
-2. **Create a new Kaggle notebook** with GPU accelerator enabled
-3. **Copy cells from** `notebooks/kaggle_pipeline.py` into the notebook
-4. **Update the `REPO_URL`** in cell 1.2 to point to your GitHub repo
-5. **Run all cells**, which will:
-   - Install TensorRT and dependencies
-   - Clone the repo
-   - Download COCO val2017 (~1GB)
-   - Run the full compression pipeline
-   - Generate benchmark results and charts
-
-### Expected Runtime
-| Step | Time |
-|------|------|
-| Setup & Data Download | ~5 min |
-| ONNX Export | ~30 sec |
-| TRT Engine Build (FP32+FP16) | ~3 min |
-| TRT Engine Build (INT8 + calibration) | ~5 min |
-| Latency Benchmarking | ~2 min |
-| mAP Evaluation (1000 images) | ~15 min |
-| Visualization & Demo | ~2 min |
-| **Total** | **~30 min** |
-
-## Expected Results (T4 GPU)
-
-> These are approximate values. Exact numbers will vary.
-
-| Model | Latency (ms) | FPS | mAP@0.5 | Size (MB) |
-|-------|-------------|-----|---------|-----------|
-| PyTorch FP32 | ~8-10 | ~100-120 | ~0.46 | ~7.2 |
-| TRT FP32 | ~4-6 | ~170-250 | ~0.46 | ~12 |
-| TRT FP16 | ~1.5-2.5 | ~400-600 | ~0.46 | ~5 |
-| TRT INT8 | ~1.0-1.5 | ~650-1000 | ~0.44-0.46 | ~4 |
-
 ## Running Individual Steps
 
 Each script can be run independently from the project root:
