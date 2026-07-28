@@ -78,41 +78,58 @@ class TRTInference:
         self.num_inputs = 0
         self.num_outputs = 0
 
-        for i in range(self.engine.num_io_tensors):
-            name = self.engine.get_tensor_name(i)
-            shape = self.engine.get_tensor_shape(name)
-            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
-            size = int(np.prod(shape))
-            nbytes = size * np.dtype(dtype).itemsize
+        # TRT 10.x API: num_io_tensors / get_tensor_name / get_tensor_mode
+        # TRT 8.x API: num_bindings / binding_is_input
+        use_modern_api = hasattr(self.engine, 'num_io_tensors')
 
-            # Allocate host (pinned) and device memory
-            host_mem = cuda.pagelocked_empty(size, dtype)
-            device_mem = cuda.mem_alloc(nbytes)
+        if use_modern_api:
+            num_tensors = self.engine.num_io_tensors
+            for i in range(num_tensors):
+                name = self.engine.get_tensor_name(i)
+                shape = self.engine.get_tensor_shape(name)
+                dtype = trt.nptype(self.engine.get_tensor_dtype(name))
+                is_input = (self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT)
+                self._alloc_binding(name, shape, dtype, is_input)
+        else:
+            # Legacy TRT 8.x API
+            for i in range(self.engine.num_bindings):
+                name = self.engine.get_binding_name(i)
+                shape = self.engine.get_binding_shape(i)
+                dtype = trt.nptype(self.engine.get_binding_dtype(i))
+                is_input = self.engine.binding_is_input(i)
+                self._alloc_binding(name, shape, dtype, is_input)
 
-            binding = {
-                "name": name,
-                "shape": tuple(shape),
-                "dtype": dtype,
-                "host": host_mem,
-                "device": device_mem,
-                "nbytes": nbytes,
-            }
+    def _alloc_binding(self, name, shape, dtype, is_input):
+        """Allocate memory for a single binding."""
+        size = int(np.prod(shape))
+        nbytes = size * np.dtype(dtype).itemsize
 
-            mode = self.engine.get_tensor_mode(name)
-            if mode == trt.TensorIOMode.INPUT:
-                self.inputs.append(binding)
-                self.num_inputs += 1
-            else:
-                self.outputs.append(binding)
-                self.output_shapes.append(tuple(shape))
-                self.num_outputs += 1
+        host_mem = cuda.pagelocked_empty(size, dtype)
+        device_mem = cuda.mem_alloc(nbytes)
 
-            self.bindings.append(int(device_mem))
+        binding = {
+            "name": name,
+            "shape": tuple(shape),
+            "dtype": dtype,
+            "host": host_mem,
+            "device": device_mem,
+            "nbytes": nbytes,
+        }
 
-            logger.info(
-                f"  {'Input' if mode == trt.TensorIOMode.INPUT else 'Output'} "
-                f"'{name}': shape={tuple(shape)}, dtype={np.dtype(dtype).name}"
-            )
+        if is_input:
+            self.inputs.append(binding)
+            self.num_inputs += 1
+        else:
+            self.outputs.append(binding)
+            self.output_shapes.append(tuple(shape))
+            self.num_outputs += 1
+
+        self.bindings.append(int(device_mem))
+
+        logger.info(
+            f"  {'Input' if is_input else 'Output'} "
+            f"'{name}': shape={tuple(shape)}, dtype={np.dtype(dtype).name}"
+        )
 
     def infer(self, input_data: np.ndarray) -> list:
         """
@@ -135,14 +152,22 @@ class TRTInference:
             self.stream,
         )
 
-        # Set tensor addresses
-        for inp in self.inputs:
-            self.context.set_tensor_address(inp["name"], int(inp["device"]))
-        for out in self.outputs:
-            self.context.set_tensor_address(out["name"], int(out["device"]))
-
-        # Execute inference
-        self.context.execute_async_v3(stream_handle=self.stream.handle)
+        # Execute inference — try modern API first, fall back to legacy
+        if hasattr(self.context, 'set_tensor_address'):
+            # TRT 10.x API
+            for inp in self.inputs:
+                self.context.set_tensor_address(inp["name"], int(inp["device"]))
+            for out in self.outputs:
+                self.context.set_tensor_address(out["name"], int(out["device"]))
+            self.context.execute_async_v3(stream_handle=self.stream.handle)
+        elif hasattr(self.context, 'execute_async_v2'):
+            # TRT 8.x API
+            self.context.execute_async_v2(
+                bindings=self.bindings,
+                stream_handle=self.stream.handle,
+            )
+        else:
+            raise RuntimeError("No compatible TensorRT execution API found")
 
         # Transfer outputs back to host
         for out in self.outputs:
