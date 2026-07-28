@@ -36,35 +36,58 @@ from ultralytics import YOLO
 logger = setup_logger("evaluate_accuracy")
 
 
-def evaluate_pytorch_builtin(model_path, coco_data_yaml, num_images=None):
+def evaluate_pytorch(model_path, images_dir, ann_file, image_ids, num_images, conf_thres, iou_thres):
     """
-    Evaluate PyTorch model using ultralytics built-in val() method.
-    This is the gold-standard evaluation and should match published numbers.
+    Evaluate PyTorch model using ultralytics inference + pycocotools.
+    Uses same evaluation approach as TRT for fair comparison.
     """
-    logger.info(f"Evaluating PyTorch model with ultralytics val(): {model_path}")
+    logger.info(f"Evaluating PyTorch model: {model_path}")
     model = YOLO(model_path)
+    all_results = []
 
-    # Use ultralytics' built-in validation
-    val_args = {
-        "data": coco_data_yaml,
-        "imgsz": 640,
-        "batch": 16,
-        "conf": 0.001,
-        "iou": 0.7,  # NMS IoU threshold for COCO eval
-        "verbose": False,
-        "plots": False,
+    for img_id in tqdm(image_ids[:num_images], desc="PyTorch FP32"):
+        img_path = get_coco_image_path(images_dir, img_id)
+        if not os.path.exists(img_path):
+            continue
+
+        # Use low conf so pycocotools gets the full precision-recall curve
+        results = model(img_path, verbose=False, conf=conf_thres, iou=iou_thres, max_det=300)
+        det = results[0].boxes.data.cpu().numpy()  # [x1, y1, x2, y2, conf, cls]
+
+        for d in det:
+            x1, y1, x2, y2, score, cls_id = d
+            w = x2 - x1
+            h = y2 - y1
+            if w <= 0 or h <= 0:
+                continue
+            all_results.append({
+                "image_id": int(img_id),
+                "category_id": COCO_CLASS_IDS[int(cls_id)],
+                "bbox": [round(float(x1), 2), round(float(y1), 2),
+                         round(float(w), 2), round(float(h), 2)],
+                "score": round(float(score), 5),
+            })
+
+    if not all_results:
+        logger.warning("No detections from PyTorch model")
+        return {"mAP50": 0.0, "mAP50-95": 0.0}
+
+    # Compute mAP using pycocotools
+    logger.info(f"Computing PyTorch mAP with {len(all_results)} detections...")
+    coco_gt = COCO(ann_file)
+    coco_dt = coco_gt.loadRes(all_results)
+    coco_eval = COCOeval(coco_gt, coco_dt, 'bbox')
+
+    # CRITICAL: only evaluate on images we have predictions for
+    coco_eval.params.imgIds = list(image_ids[:num_images])
+    coco_eval.evaluate()
+    coco_eval.accumulate()
+    coco_eval.summarize()
+
+    return {
+        "mAP50": float(coco_eval.stats[1]),
+        "mAP50-95": float(coco_eval.stats[0]),
     }
-    if num_images and num_images < 5000:
-        val_args["max_det"] = 300
-
-    results = model.val(**val_args)
-
-    # ultralytics results object has .box attribute with mAP values
-    map50 = results.box.map50  # mAP@0.5
-    map50_95 = results.box.map  # mAP@0.5:0.95
-
-    logger.info(f"PyTorch FP32: mAP@0.5={map50:.4f}, mAP@0.5:0.95={map50_95:.4f}")
-    return {"mAP50": float(map50), "mAP50-95": float(map50_95)}
 
 
 def evaluate_trt(engine_path, images_dir, ann_file, image_ids, num_images, conf_thres, iou_thres):
@@ -256,11 +279,11 @@ def main():
 
     results_summary = {}
 
-    # PyTorch: use ultralytics built-in val() for gold-standard mAP
+    # PyTorch: evaluate with pycocotools (same approach as TRT for fair comparison)
     if "pytorch" in args.models:
-        coco_yaml = _create_coco_data_yaml(config["paths"]["coco_dir"], images_dir, ann_file)
-        metrics = evaluate_pytorch_builtin(
-            config["model"]["weights"], coco_yaml, num_images
+        metrics = evaluate_pytorch(
+            config["model"]["weights"], images_dir, ann_file, image_ids,
+            num_images, conf_thres, iou_thres
         )
         results_summary["PyTorch FP32"] = metrics
 
