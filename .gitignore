@@ -34,7 +34,3 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
-
-# Screenshots (original)
-screenshot_*.png
-Screenshot*.png
