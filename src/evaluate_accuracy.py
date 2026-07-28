@@ -108,13 +108,14 @@ def compute_map(coco_gt, coco_res_list):
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate YOLOv5n accuracy on COCO.")
+    parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config file")
     parser.add_argument("--num-images", type=int, default=None,
                         help="Number of images to evaluate")
     parser.add_argument("--models", nargs="+", default=["pytorch", "trt_fp32", "trt_fp16", "trt_int8"],
                         help="Models to evaluate")
     args = parser.parse_args()
 
-    config = load_config()
+    config = load_config(args.config)
     num_images = args.num_images or config["evaluation"]["num_images"]
     conf_thres = config["evaluation"]["confidence_threshold"]
     iou_thres = config["evaluation"]["nms_iou_threshold"]
