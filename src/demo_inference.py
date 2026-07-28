@@ -57,6 +57,11 @@ def main():
 
     config = load_config(args.config)
     demo_dir = config["paths"]["demo_dir"]
+    # Clean old demo files to avoid stale outputs
+    if os.path.exists(demo_dir):
+        import glob
+        for old_file in glob.glob(os.path.join(demo_dir, "demo_*")):
+            os.remove(old_file)
     os.makedirs(demo_dir, exist_ok=True)
 
     ann_file = config["paths"]["coco_annotations"]
@@ -116,13 +121,6 @@ def main():
 
     if engine:
         input_size = engine.get_input_shape()[-1]
-
-        # Warmup: run a few dummy inferences to stabilize the CUDA context
-        # The first call after PyTorch cleanup can fail silently
-        logger.info(f"Warming up {engine_name} engine...")
-        dummy_input = np.random.randn(1, 3, input_size, input_size).astype(np.float32)
-        for _ in range(5):
-            engine.infer(dummy_input)
 
         logger.info(f"Pass 2: Running {engine_name} inference on all samples...")
 
