@@ -126,8 +126,8 @@ def main():
     # 1. PyTorch
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pt_metrics = benchmark_pytorch(logger, config, device)
-    results["PyTorch"] = pt_metrics
-    
+    results["PyTorch FP32"] = pt_metrics
+
     # 2. TensorRT
     if HAS_TENSORRT:
         precisions = ["fp32", "fp16", "int8"]
@@ -135,7 +135,7 @@ def main():
             engine_path = config["paths"].get(f"{prec}_engine", f"outputs/yolov5n_{prec}.engine")
             trt_metrics = benchmark_trt(logger, engine_path, config)
             if trt_metrics:
-                results[f"TensorRT {prec.upper()}"] = trt_metrics
+                results[f"TRT {prec.upper()}"] = trt_metrics
     else:
         logger.warning("TensorRT not available, skipping TRT benchmarks.")
         

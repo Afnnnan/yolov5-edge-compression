@@ -322,6 +322,9 @@ def postprocess_yolov5(
         else:
             # YOLOv5nu / YOLOv8: confidence = class_prob directly
             class_scores = predictions[:, 4:]
+            # Apply sigmoid if scores are raw logits
+            if class_scores.min() < 0.0 or class_scores.max() > 1.0:
+                class_scores = 1.0 / (1.0 + np.exp(-np.clip(class_scores, -88, 88)))
 
         class_ids = class_scores.argmax(axis=1)
         class_confs = class_scores.max(axis=1)

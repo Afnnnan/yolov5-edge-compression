@@ -72,8 +72,13 @@ def run_trt(engine, img_path, conf_thres, iou_thres):
     return dets, (t1 - t0) * 1000
 
 
-def main():
-    config = load_config()
+    parser = argparse.ArgumentParser(description="Run visual demo inference")
+    parser.add_argument("--config", type=str, default="configs/config.yaml", help="Path to config file")
+    parser.add_argument("--conf-thres", type=float, default=0.25, help="Confidence threshold for visualization")
+    parser.add_argument("--iou-thres", type=float, default=0.45, help="NMS IoU threshold")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
     demo_dir = config["paths"]["demo_dir"]
     os.makedirs(demo_dir, exist_ok=True)
     
@@ -93,18 +98,23 @@ def main():
     # Load PyTorch model
     pt_model = YOLO(config["model"]["weights"])
     
-    # Load TRT INT8 model
-    trt_engine_path = config["paths"]["int8_engine"]
+    # Load TRT engine (try INT8 -> FP16 -> FP32)
     engine = None
-    if os.path.exists(trt_engine_path):
-        try:
-            from utils.trt_inference import TRTInference
-            engine = TRTInference(trt_engine_path)
-        except Exception as e:
-            logger.error(f"Failed to load engine: {e}")
+    engine_name = "TRT INT8"
+    for prec, key in [("INT8", "int8_engine"), ("FP16", "fp16_engine"), ("FP32", "fp32_engine")]:
+        trt_path = config["paths"].get(key, f"outputs/yolov5n_{prec.lower()}.engine")
+        if os.path.exists(trt_path):
+            try:
+                from utils.trt_inference import TRTInference
+                engine = TRTInference(trt_path)
+                engine_name = f"TRT {prec}"
+                logger.info(f"Loaded {engine_name} engine from {trt_path}")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load {prec} engine: {e}")
             
-    conf_thres = 0.25
-    iou_thres = 0.45
+    conf_thres = args.conf_thres
+    iou_thres = args.iou_thres
     
     int8_images = []
     
@@ -122,11 +132,11 @@ def main():
         if engine:
             trt_dets, trt_time = run_trt(engine, img_path, conf_thres, iou_thres)
             trt_img = draw_detections(orig_img, trt_dets, colors)
-            cv2.putText(trt_img, f"TRT INT8: {len(trt_dets)} objs, {trt_time:.1f}ms", 
+            cv2.putText(trt_img, f"{engine_name}: {len(trt_dets)} objs, {trt_time:.1f}ms", 
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         else:
             trt_img = orig_img.copy()
-            cv2.putText(trt_img, "TRT INT8 Not Available", (10, 30), 
+            cv2.putText(trt_img, "TRT Engine Not Available", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
         # Side-by-side
@@ -137,7 +147,7 @@ def main():
         int8_images.append(cv2.resize(trt_img, (640, 640)))
         
         if engine:
-            logger.info(f"Image {img_id}: PT={len(pt_dets)} objs ({pt_time:.1f}ms) | TRT INT8={len(trt_dets)} objs ({trt_time:.1f}ms)")
+            logger.info(f"Image {img_id}: PT={len(pt_dets)} objs ({pt_time:.1f}ms) | {engine_name}={len(trt_dets)} objs ({trt_time:.1f}ms)")
         else:
             logger.info(f"Image {img_id}: PT={len(pt_dets)} objs ({pt_time:.1f}ms) | TRT not available")
 

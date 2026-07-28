@@ -346,25 +346,29 @@ print("-" * 90)
 print(f"{'Model':<20} {'Latency (ms)':<15} {'FPS':<10} {'mAP@0.5':<12} {'mAP@0.5:0.95':<15} {'Size (MB)':<10}")
 print("-" * 90)
 
-model_variants = ["PyTorch_FP32", "TRT_FP32", "TRT_FP16", "TRT_INT8"]
+model_variants = ["PyTorch FP32", "TRT FP32", "TRT FP16", "TRT INT8"]
 engine_paths = {
-    "PyTorch_FP32": None,
-    "TRT_FP32": "outputs/yolov5n_fp32.engine",
-    "TRT_FP16": "outputs/yolov5n_fp16.engine",
-    "TRT_INT8": "outputs/yolov5n_int8.engine",
+    "PyTorch FP32": None,
+    "TRT FP32": "outputs/yolov5n_fp32.engine",
+    "TRT FP16": "outputs/yolov5n_fp16.engine",
+    "TRT INT8": "outputs/yolov5n_int8.engine",
 }
 
 for model_name in model_variants:
     latency = fps = map50 = map50_95 = size_mb = "N/A"
 
     if os.path.exists(results_path):
-        bench = bench_results.get(model_name, {})
+        bench = bench_results.get(model_name, bench_results.get(model_name.replace("_", " "), {}))
         if isinstance(bench, dict):
-            latency = f"{bench.get('mean_ms', 0):.2f}"
-            fps = f"{bench.get('fps', 0):.1f}"
+            lat_val = bench.get('mean_ms', bench.get('mean_latency_ms', 0))
+            fps_val = bench.get('fps', bench.get('throughput_fps', 0))
+            if lat_val > 0:
+                latency = f"{lat_val:.2f}"
+            if fps_val > 0:
+                fps = f"{fps_val:.1f}"
 
     if os.path.exists(acc_path):
-        acc = acc_results.get(model_name, {})
+        acc = acc_results.get(model_name, acc_results.get(model_name.replace("_", " "), {}))
         if isinstance(acc, dict):
             map50 = f"{acc.get('mAP50', 0):.4f}"
             map50_95 = f"{acc.get('mAP50-95', 0):.4f}"
@@ -379,8 +383,10 @@ print("-" * 90)
 
 # Speedup summary
 if os.path.exists(results_path):
-    pytorch_lat = bench_results.get("models", {}).get("PyTorch_FP32", {}).get("mean_latency_ms", 0)
-    int8_lat = bench_results.get("models", {}).get("TRT_INT8", {}).get("mean_latency_ms", 0)
+    pt_bench = bench_results.get("PyTorch FP32", bench_results.get("PyTorch", {}))
+    int8_bench = bench_results.get("TRT INT8", bench_results.get("TensorRT INT8", {}))
+    pytorch_lat = pt_bench.get("mean_ms", pt_bench.get("mean_latency_ms", 0))
+    int8_lat = int8_bench.get("mean_ms", int8_bench.get("mean_latency_ms", 0))
     if pytorch_lat > 0 and int8_lat > 0:
         speedup = pytorch_lat / int8_lat
         print(f"\n🚀 INT8 Speedup over PyTorch FP32: {speedup:.2f}x")
